@@ -1,0 +1,766 @@
+# =============================================================================
+# CREWAI STOCK ANALYSIS DASHBOARD
+# A multi-agent stock analysis system with Robinhood-style UI
+# =============================================================================
+
+import os
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+from datetime import datetime, timedelta
+import numpy as np
+from ta import momentum, trend, volatility
+import warnings
+warnings.filterwarnings('ignore')
+
+# CrewAI imports
+from crewai import Agent, Task, Crew, Process
+from langchain_openai import ChatOpenAI
+
+# =============================================================================
+# CONFIGURATION & SETUP
+# =============================================================================
+
+# OpenAI API Configuration
+# IMPORTANT: Replace 'YOUR_OPENAI_API_KEY_HERE' with your actual key
+OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"  # Replace with: sk-proj-C3trOEYoIr1JfOlGE3EqT3BlbkFJai1JhA2RQelJlzU0LjXd
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+
+# Initialize LLM for CrewAI
+llm = ChatOpenAI(
+    model="gpt-4o-mini",  # Cost-effective model
+    temperature=0.1,      # Low temperature for consistent analysis
+    api_key=OPENAI_API_KEY
+)
+
+# =============================================================================
+# STREAMLIT PAGE CONFIGURATION & STYLING
+# =============================================================================
+
+def setup_page_config():
+    """Configure Streamlit page with Robinhood-style sci-fi theme"""
+    
+    st.set_page_config(
+        page_title="🚀 AI Stock Analyzer",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    # Custom CSS for Robinhood-style sci-fi theme
+    st.markdown("""
+    <style>
+        /* Main background with sci-fi gradient */
+        .stApp {
+            background: linear-gradient(135deg, #0D1B2A 0%, #1B263B 25%, #415A77 50%, #778DA9 75%, #E0E1DD 100%);
+            background-attachment: fixed;
+        }
+        
+        /* Custom containers */
+        .main-container {
+            background: rgba(13, 27, 42, 0.95);
+            border-radius: 15px;
+            padding: 20px;
+            margin: 10px 0;
+            border: 1px solid #00D4AA;
+            box-shadow: 0 0 20px rgba(0, 212, 170, 0.3);
+        }
+        
+        /* Robinhood-style green accent */
+        .metric-positive {
+            color: #00D4AA !important;
+            font-weight: bold;
+        }
+        
+        .metric-negative {
+            color: #FF6B6B !important;
+            font-weight: bold;
+        }
+        
+        /* Sidebar styling */
+        .css-1d391kg {
+            background: linear-gradient(180deg, #0D1B2A 0%, #1B263B 100%);
+        }
+        
+        /* Button styling */
+        .stButton > button {
+            background: linear-gradient(45deg, #00D4AA, #00B894);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            padding: 10px 20px;
+            font-weight: bold;
+            box-shadow: 0 4px 15px rgba(0, 212, 170, 0.4);
+            transition: all 0.3s ease;
+        }
+        
+        .stButton > button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 212, 170, 0.6);
+        }
+        
+        /* Metric cards */
+        .metric-card {
+            background: rgba(27, 38, 59, 0.9);
+            border-radius: 10px;
+            padding: 15px;
+            margin: 10px;
+            border: 1px solid #415A77;
+            text-align: center;
+        }
+        
+        /* Headers */
+        h1, h2, h3 {
+            color: #E0E1DD !important;
+            text-shadow: 0 0 10px rgba(224, 225, 221, 0.5);
+        }
+        
+        /* Agent response styling */
+        .agent-response {
+            background: rgba(27, 38, 59, 0.8);
+            border-left: 4px solid #00D4AA;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        
+        /* Sci-fi glow effect */
+        .glow {
+            animation: glow 2s ease-in-out infinite alternate;
+        }
+        
+        @keyframes glow {
+            from { box-shadow: 0 0 5px #00D4AA; }
+            to { box-shadow: 0 0 20px #00D4AA, 0 0 30px #00D4AA; }
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+# =============================================================================
+# DATA COLLECTION FUNCTIONS
+# =============================================================================
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_stock_data(ticker, period="1y"):
+    """
+    Fetch comprehensive stock data from Yahoo Finance
+    
+    Args:
+        ticker (str): Stock symbol (e.g., 'AAPL')
+        period (str): Time period for data ('1y', '6mo', '3mo', etc.)
+    
+    Returns:
+        dict: Comprehensive stock data including prices, info, and calculated indicators
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        
+        # Get historical data
+        hist_data = stock.history(period=period)
+        
+        # Get company info
+        info = stock.info
+        
+        # Calculate technical indicators
+        hist_data['SMA_20'] = hist_data['Close'].rolling(window=20).mean()
+        hist_data['SMA_50'] = hist_data['Close'].rolling(window=50).mean()
+        hist_data['SMA_200'] = hist_data['Close'].rolling(window=200).mean()
+        hist_data['RSI'] = momentum.rsi(hist_data['Close'], window=14)
+        hist_data['MACD'] = trend.macd_diff(hist_data['Close'])
+        hist_data['MACD_Signal'] = trend.macd_signal(hist_data['Close'])
+        hist_data['BB_Upper'] = volatility.bollinger_hband(hist_data['Close'])
+        hist_data['BB_Lower'] = volatility.bollinger_lband(hist_data['Close'])
+        
+        # Prepare technical analysis data
+        current_price = hist_data['Close'].iloc[-1]
+        technical_data = {
+            'current_price': current_price,
+            'rsi': hist_data['RSI'].iloc[-1],
+            'macd': hist_data['MACD'].iloc[-1],
+            'macd_signal': hist_data['MACD_Signal'].iloc[-1],
+            'sma_20': hist_data['SMA_20'].iloc[-1],
+            'sma_50': hist_data['SMA_50'].iloc[-1],
+            'sma_200': hist_data['SMA_200'].iloc[-1],
+            'above_sma_20': current_price > hist_data['SMA_20'].iloc[-1],
+            'above_sma_50': current_price > hist_data['SMA_50'].iloc[-1],
+            'above_sma_200': current_price > hist_data['SMA_200'].iloc[-1],
+            'volume_trend': 'Above Average' if hist_data['Volume'].iloc[-1] > hist_data['Volume'].mean() else 'Below Average'
+        }
+        
+        # Prepare fundamental data
+        fundamental_data = {
+            'pe_ratio': info.get('trailingPE'),
+            'forward_pe': info.get('forwardPE'),
+            'pb_ratio': info.get('priceToBook'),
+            'debt_to_equity': info.get('debtToEquity'),
+            'roe': info.get('returnOnEquity'),
+            'profit_margin': info.get('profitMargins'),
+            'revenue_growth': info.get('revenueGrowth'),
+            'market_cap': info.get('marketCap'),
+            'beta': info.get('beta'),
+            'dividend_yield': info.get('dividendYield')
+        }
+        
+        # Company information
+        company_info = {
+            'name': info.get('longName'),
+            'sector': info.get('sector'),
+            'industry': info.get('industry'),
+            'description': info.get('longBusinessSummary'),
+            'website': info.get('website'),
+            'employees': info.get('fullTimeEmployees')
+        }
+        
+        return {
+            'historical_data': hist_data,
+            'technical': technical_data,
+            'fundamental': fundamental_data,
+            'company_info': company_info,
+            'raw_info': info
+        }
+        
+    except Exception as e:
+        st.error(f"Error fetching data for {ticker}: {str(e)}")
+        return None
+
+# =============================================================================
+# CREWAI MULTI-AGENT SYSTEM
+# =============================================================================
+
+def create_stock_analysis_agents():
+    """
+    Create specialized CrewAI agents for stock analysis
+    
+    Returns:
+        dict: Dictionary of specialized agents
+    """
+    
+    # Technical Analysis Agent
+    technical_analyst = Agent(
+        role='Senior Technical Analyst',
+        goal='Analyze technical indicators, chart patterns, and price movements to provide trading signals',
+        backstory='''You are a seasoned technical analyst with 15+ years of experience in 
+        reading charts and technical indicators. You specialize in identifying entry/exit points, 
+        support/resistance levels, and short-term price momentum. You only focus on technical 
+        data and provide actionable trading insights.''',
+        verbose=True,
+        allow_delegation=False,
+        llm=llm
+    )
+    
+    # Fundamental Analysis Agent  
+    fundamental_analyst = Agent(
+        role='Senior Fundamental Analyst',
+        goal='Evaluate company financial health, valuation metrics, and long-term investment potential',
+        backstory='''You are a CFA charterholder with deep expertise in financial statement 
+        analysis, company valuation, and industry research. You focus on determining intrinsic 
+        value, financial strength, and long-term growth prospects. You provide investment 
+        recommendations based on company fundamentals and valuation.''',
+        verbose=True,
+        allow_delegation=False,
+        llm=llm
+    )
+    
+    # Risk Management Agent
+    risk_manager = Agent(
+        role='Risk Management Specialist',
+        goal='Assess investment risks, determine position sizing, and provide risk mitigation strategies',
+        backstory='''You are a quantitative risk analyst with expertise in portfolio risk 
+        management. You specialize in calculating risk metrics, determining appropriate 
+        position sizes, and identifying potential risk factors. You focus on downside 
+        protection and risk-adjusted returns.''',
+        verbose=True,
+        allow_delegation=False,
+        llm=llm
+    )
+    
+    # Portfolio Manager (Final Decision Maker)
+    portfolio_manager = Agent(
+        role='Senior Portfolio Manager',
+        goal='Synthesize all analyses to provide final investment recommendations',
+        backstory='''You are a senior portfolio manager with 20+ years of experience managing 
+        institutional portfolios. You combine technical, fundamental, and risk analysis to make 
+        final investment decisions. You provide clear, actionable recommendations with specific 
+        entry points, position sizes, and time horizons.''',
+        verbose=True,
+        allow_delegation=False,
+        llm=llm
+    )
+    
+    return {
+        'technical': technical_analyst,
+        'fundamental': fundamental_analyst,
+        'risk': risk_manager,
+        'portfolio': portfolio_manager
+    }
+
+def create_analysis_tasks(ticker, stock_data, agents):
+    """
+    Create specific tasks for each agent
+    
+    Args:
+        ticker (str): Stock symbol
+        stock_data (dict): Comprehensive stock data
+        agents (dict): Dictionary of CrewAI agents
+    
+    Returns:
+        list: List of CrewAI tasks
+    """
+    
+    # Technical Analysis Task
+    technical_task = Task(
+        description=f'''
+        Conduct comprehensive technical analysis for {ticker}:
+        
+        Current Technical Data:
+        - Current Price: ${stock_data['technical']['current_price']:.2f}
+        - RSI: {stock_data['technical']['rsi']:.2f}
+        - MACD: {stock_data['technical']['macd']:.4f}
+        - Price vs SMA 20: {"Above" if stock_data['technical']['above_sma_20'] else "Below"} (${stock_data['technical']['sma_20']:.2f})
+        - Price vs SMA 50: {"Above" if stock_data['technical']['above_sma_50'] else "Below"} (${stock_data['technical']['sma_50']:.2f})
+        - Price vs SMA 200: {"Above" if stock_data['technical']['above_sma_200'] else "Below"} (${stock_data['technical']['sma_200']:.2f})
+        - Volume Trend: {stock_data['technical']['volume_trend']}
+        
+        Provide:
+        1. Current technical signal (Bullish/Bearish/Neutral)
+        2. Key support and resistance levels
+        3. Entry price recommendations
+        4. Stop-loss levels
+        5. Short-term price targets
+        6. Risk assessment from technical perspective
+        ''',
+        expected_output='''Technical analysis report with:
+        - Clear signal: BULLISH/BEARISH/NEUTRAL
+        - Specific entry price range
+        - Stop-loss recommendation
+        - Price targets (3-month horizon)
+        - Technical risk level: LOW/MEDIUM/HIGH''',
+        agent=agents['technical']
+    )
+    
+    # Fundamental Analysis Task
+    fundamental_task = Task(
+        description=f'''
+        Perform fundamental analysis for {ticker}:
+        
+        Company: {stock_data['company_info']['name']}
+        Sector: {stock_data['company_info']['sector']}
+        
+        Key Fundamental Metrics:
+        - P/E Ratio: {stock_data['fundamental']['pe_ratio']}
+        - Forward P/E: {stock_data['fundamental']['forward_pe']}
+        - P/B Ratio: {stock_data['fundamental']['pb_ratio']}
+        - Debt/Equity: {stock_data['fundamental']['debt_to_equity']}
+        - ROE: {stock_data['fundamental']['roe']}
+        - Profit Margin: {stock_data['fundamental']['profit_margin']}
+        - Revenue Growth: {stock_data['fundamental']['revenue_growth']}
+        - Market Cap: {stock_data['fundamental']['market_cap']}
+        
+        Analyze:
+        1. Valuation assessment (undervalued/fairly valued/overvalued)
+        2. Financial health score
+        3. Growth prospects
+        4. Competitive position
+        5. Fair value estimate
+        6. Long-term investment attractiveness
+        ''',
+        expected_output='''Fundamental analysis report including:
+        - Valuation assessment: UNDERVALUED/FAIRLY VALUED/OVERVALUED
+        - Financial health score: STRONG/MODERATE/WEAK
+        - Fair value price estimate
+        - Long-term growth potential
+        - Key fundamental risks''',
+        agent=agents['fundamental']
+    )
+    
+    # Risk Assessment Task
+    risk_task = Task(
+        description=f'''
+        Assess investment risks for {ticker}:
+        
+        Risk Factors to Consider:
+        - Beta: {stock_data['fundamental']['beta']}
+        - Debt/Equity: {stock_data['fundamental']['debt_to_equity']}
+        - Sector: {stock_data['company_info']['sector']}
+        - Market Cap: {stock_data['fundamental']['market_cap']}
+        - Technical RSI: {stock_data['technical']['rsi']:.2f}
+        
+        Evaluate:
+        1. Overall risk level (Low/Medium/High)
+        2. Specific risk factors
+        3. Position sizing recommendation (% of portfolio)
+        4. Risk mitigation strategies
+        5. Volatility assessment
+        6. Scenario analysis (best/worst case)
+        ''',
+        expected_output='''Risk assessment report with:
+        - Overall risk level: LOW/MEDIUM/HIGH
+        - Maximum position size recommendation (% of portfolio)
+        - Top 3 risk factors to monitor
+        - Risk mitigation strategies
+        - Volatility expectations''',
+        agent=agents['risk']
+    )
+    
+    # Final Investment Decision Task
+    portfolio_task = Task(
+        description=f'''
+        Based on the technical, fundamental, and risk analyses above, provide final 
+        investment recommendation for {ticker}.
+        
+        Synthesize all previous analyses and provide:
+        1. Final recommendation (STRONG BUY/BUY/HOLD/SELL/STRONG SELL)
+        2. Confidence level (HIGH/MEDIUM/LOW)
+        3. Recommended position size
+        4. Optimal entry price range
+        5. Time horizon
+        6. Exit strategy
+        7. Key monitoring points
+        8. Overall investment thesis
+        
+        Make it actionable for retail investors.
+        ''',
+        expected_output='''Comprehensive investment recommendation with:
+        - Clear action: STRONG BUY/BUY/HOLD/SELL/STRONG SELL
+        - Confidence level and reasoning
+        - Specific position size (% of portfolio)
+        - Entry price range and timing
+        - Time horizon and exit strategy
+        - Top 3 factors to monitor going forward''',
+        agent=agents['portfolio'],
+        context=[technical_task, fundamental_task, risk_task]
+    )
+    
+    return [technical_task, fundamental_task, risk_task, portfolio_task]
+
+def run_crewai_analysis(ticker, stock_data):
+    """
+    Execute the CrewAI multi-agent stock analysis
+    
+    Args:
+        ticker (str): Stock symbol
+        stock_data (dict): Comprehensive stock data
+    
+    Returns:
+        str: Combined analysis results from all agents
+    """
+    try:
+        # Create agents
+        agents = create_stock_analysis_agents()
+        
+        # Create tasks
+        tasks = create_analysis_tasks(ticker, stock_data, agents)
+        
+        # Create crew
+        crew = Crew(
+            agents=list(agents.values()),
+            tasks=tasks,
+            process=Process.sequential,  # Run tasks in sequence
+            verbose=2
+        )
+        
+        # Execute analysis
+        with st.spinner('🤖 AI Agents analyzing your stock...'):
+            result = crew.kickoff()
+        
+        return result
+        
+    except Exception as e:
+        return f"Error in CrewAI analysis: {str(e)}\nPlease check your OpenAI API key and try again."
+
+# =============================================================================
+# VISUALIZATION FUNCTIONS
+# =============================================================================
+
+def create_price_chart(hist_data, ticker):
+    """Create interactive price chart with technical indicators"""
+    
+    fig = go.Figure()
+    
+    # Candlestick chart
+    fig.add_trace(go.Candlestick(
+        x=hist_data.index,
+        open=hist_data['Open'],
+        high=hist_data['High'],
+        low=hist_data['Low'],
+        close=hist_data['Close'],
+        name='Price',
+        increasing_line_color='#00D4AA',
+        decreasing_line_color='#FF6B6B'
+    ))
+    
+    # Moving averages
+    fig.add_trace(go.Scatter(
+        x=hist_data.index, 
+        y=hist_data['SMA_20'],
+        name='SMA 20',
+        line=dict(color='orange', width=1)
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=hist_data.index, 
+        y=hist_data['SMA_50'],
+        name='SMA 50',
+        line=dict(color='blue', width=1)
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=hist_data.index, 
+        y=hist_data['SMA_200'],
+        name='SMA 200',
+        line=dict(color='red', width=1)
+    ))
+    
+    fig.update_layout(
+        title=f'{ticker} Price Chart with Moving Averages',
+        xaxis_title='Date',
+        yaxis_title='Price ($)',
+        template='plotly_dark',
+        height=500
+    )
+    
+    return fig
+
+def create_rsi_chart(hist_data):
+    """Create RSI indicator chart"""
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=hist_data.index,
+        y=hist_data['RSI'],
+        name='RSI',
+        line=dict(color='#00D4AA', width=2)
+    ))
+    
+    # Overbought/Oversold lines
+    fig.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought (70)")
+    fig.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold (30)")
+    fig.add_hline(y=50, line_dash="dot", line_color="gray", annotation_text="Neutral (50)")
+    
+    fig.update_layout(
+        title='RSI Indicator',
+        xaxis_title='Date',
+        yaxis_title='RSI',
+        template='plotly_dark',
+        height=300
+    )
+    
+    return fig
+
+def display_key_metrics(stock_data):
+    """Display key metrics in a grid layout"""
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        current_price = stock_data['technical']['current_price']
+        st.metric("Current Price", f"${current_price:.2f}")
+        
+        pe_ratio = stock_data['fundamental']['pe_ratio']
+        if pe_ratio:
+            st.metric("P/E Ratio", f"{pe_ratio:.2f}")
+        else:
+            st.metric("P/E Ratio", "N/A")
+    
+    with col2:
+        rsi = stock_data['technical']['rsi']
+        rsi_color = "🟢" if 30 <= rsi <= 70 else "🔴"
+        st.metric("RSI", f"{rsi:.1f} {rsi_color}")
+        
+        debt_equity = stock_data['fundamental']['debt_to_equity']
+        if debt_equity:
+            st.metric("Debt/Equity", f"{debt_equity:.2f}")
+        else:
+            st.metric("Debt/Equity", "N/A")
+    
+    with col3:
+        market_cap = stock_data['fundamental']['market_cap']
+        if market_cap:
+            market_cap_b = market_cap / 1e9
+            st.metric("Market Cap", f"${market_cap_b:.1f}B")
+        else:
+            st.metric("Market Cap", "N/A")
+            
+        roe = stock_data['fundamental']['roe']
+        if roe:
+            st.metric("ROE", f"{roe:.1%}")
+        else:
+            st.metric("ROE", "N/A")
+    
+    with col4:
+        volume_trend = stock_data['technical']['volume_trend']
+        volume_color = "🟢" if volume_trend == "Above Average" else "🔴"
+        st.metric("Volume", f"{volume_trend} {volume_color}")
+        
+        beta = stock_data['fundamental']['beta']
+        if beta:
+            st.metric("Beta", f"{beta:.2f}")
+        else:
+            st.metric("Beta", "N/A")
+
+# =============================================================================
+# MAIN STREAMLIT APPLICATION
+# =============================================================================
+
+def main():
+    """Main Streamlit application"""
+    
+    # Setup page configuration and styling
+    setup_page_config()
+    
+    # Header with sci-fi styling
+    st.markdown("""
+    <div style='text-align: center; padding: 20px;'>
+        <h1 style='color: #00D4AA; font-size: 3em; text-shadow: 0 0 20px #00D4AA;'>
+            🚀 AI STOCK ANALYZER
+        </h1>
+        <p style='color: #E0E1DD; font-size: 1.2em;'>
+            Multi-Agent AI System for Comprehensive Stock Analysis
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar configuration
+    with st.sidebar:
+        st.markdown("### 🎛️ Analysis Controls")
+        
+        # Stock ticker input
+        ticker = st.text_input(
+            "Stock Ticker",
+            value="AAPL",
+            help="Enter stock symbol (e.g., AAPL, GOOGL, TSLA)"
+        ).upper()
+        
+        # Time period selection
+        period = st.selectbox(
+            "Analysis Period",
+            ["1y", "6mo", "3mo", "1mo"],
+            index=0,
+            help="Select time period for historical data"
+        )
+        
+        # Analysis button
+        analyze_button = st.button(
+            "🚀 Launch Analysis",
+            type="primary",
+            use_container_width=True
+        )
+        
+        st.markdown("---")
+        st.markdown("""
+        ### 🤖 AI Agents
+        - **Technical Analyst**: Chart patterns & indicators
+        - **Fundamental Analyst**: Financial health & valuation  
+        - **Risk Manager**: Risk assessment & position sizing
+        - **Portfolio Manager**: Final investment decision
+        """)
+        
+        st.markdown("---")
+        st.markdown("### ⚠️ Disclaimer")
+        st.caption("This is for educational purposes only. Not financial advice.")
+    
+    # Main content area
+    if analyze_button:
+        if not OPENAI_API_KEY or OPENAI_API_KEY == "YOUR_OPENAI_API_KEY_HERE":
+            st.error("⚠️ Please add your OpenAI API key in the code configuration section!")
+            st.code("OPENAI_API_KEY = 'your-actual-api-key-here'")
+            return
+        
+        # Fetch stock data
+        with st.spinner(f'📊 Fetching data for {ticker}...'):
+            stock_data = get_stock_data(ticker, period)
+        
+        if stock_data is None:
+            st.error(f"❌ Could not fetch data for {ticker}. Please check the ticker symbol.")
+            return
+        
+        # Display company information
+        st.markdown(f"""
+        <div class='main-container'>
+            <h2>📈 {stock_data['company_info']['name']} ({ticker})</h2>
+            <p><strong>Sector:</strong> {stock_data['company_info']['sector']}</p>
+            <p><strong>Industry:</strong> {stock_data['company_info']['industry']}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Display key metrics
+        st.markdown("### 📊 Key Metrics")
+        display_key_metrics(stock_data)
+        
+        # Create tabs for different views
+        tab1, tab2, tab3, tab4 = st.tabs(["📈 Charts", "🔍 Technical", "💰 Fundamentals", "🤖 AI Analysis"])
+        
+        with tab1:
+            st.markdown("### Price Chart")
+            price_chart = create_price_chart(stock_data['historical_data'], ticker)
+            st.plotly_chart(price_chart, use_container_width=True)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("### RSI Indicator")
+                rsi_chart = create_rsi_chart(stock_data['historical_data'])
+                st.plotly_chart(rsi_chart, use_container_width=True)
+            
+            with col2:
+                st.markdown("### Volume Trend")
+                volume_chart = go.Figure()
+                volume_chart.add_trace(go.Scatter(
+                    x=stock_data['historical_data'].index,
+                    y=stock_data['historical_data']['Volume'],
+                    fill='tonexty',
+                    name='Volume',
+                    line=dict(color='#00D4AA')
+                ))
+                volume_chart.update_layout(
+                    title='Trading Volume',
+                    template='plotly_dark',
+                    height=300
+                )
+                st.plotly_chart(volume_chart, use_container_width=True)
+        
+        with tab2:
+            st.markdown("### 🔍 Technical Analysis Summary")
+            
+            tech_data = stock_data['technical']
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("#### 📊 Price vs Moving Averages")
+                sma_data = {
+                    'SMA 20': {'price': tech_data['sma_20'], 'status': '🟢 Above' if tech_data['above_sma_20'] else '🔴 Below'},
+                    'SMA 50': {'price': tech_data['sma_50'], 'status': '🟢 Above' if tech_data['above_sma_50'] else '🔴 Below'},
+                    'SMA 200': {'price': tech_data['sma_200'], 'status': '🟢 Above' if tech_data['above_sma_200'] else '🔴 Below'}
+                }
+                
+                for sma, info in sma_data.items():
+                    st.write(f"**{sma}**: ${info['price']:.2f} - {info['status']}")
+            
+            with col2:
+                st.markdown("#### ⚡ Momentum Indicators")
+                
+                rsi_status = "🟢 Neutral" if 30 <= tech_data['rsi'] <= 70 else "🔴 Overbought" if tech_data['rsi'] > 70 else "🟡 Oversold"
+                st.write(f"**RSI**: {tech_data['rsi']:.1f} - {rsi_status}")
+                
+                macd_status = "🟢 Bullish" if tech_data['macd'] > tech_data['macd_signal'] else "🔴 Bearish"
+                st.write(f"**MACD**: {macd_status}")
+                
+                st.write(f"**Volume**: {tech_data['volume_trend']}")
+        
+        with tab3:
+            st.markdown("### 💰 Fundamental Analysis Summary")
+            
+            fund_data = stock_data['fundamental']
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("#### 📊 Valuation Metrics")
+                if fund_data['pe_ratio']:
+                    pe_status = "🟢 Reasonable" if fund_data['pe_ratio'] < 25 else "🔴 High"
+                    st.write(f"**P/E Ratio**: {fund_data['pe_ratio']:.1f} - {pe_status}")
+                
+                if fund_data['pb_ratio']:
